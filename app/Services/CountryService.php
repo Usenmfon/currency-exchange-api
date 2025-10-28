@@ -3,7 +3,6 @@
 namespace App\Services;
 
 use App\Models\Country;
-use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Intervention\Image\Laravel\Facades\Image;
@@ -13,6 +12,7 @@ class CountryService
     public function refreshCountries()
     {
         DB::beginTransaction();
+
         try {
             $countriesResp = Http::timeout(10)->get('https://restcountries.com/v2/all?fields=name,capital,region,population,flag,currencies');
             if (! $countriesResp->successful()) {
@@ -27,21 +27,32 @@ class CountryService
             $exchangeRates = $exchangeResp->json()['rates'];
 
             foreach ($countriesResp->json() as $data) {
+                $population = (int) ($data['population'] ?? 0);
+
                 $currencyCode = $data['currencies'][0]['code'] ?? null;
-                $exchangeRate = $currencyCode && isset($exchangeRates[$currencyCode]) ? $exchangeRates[$currencyCode] : null;
-                $estimatedGdp = $data['population'] && $exchangeRate ? ($data['population'] * rand(1000, 2000)) / $exchangeRate : 0;
+
+                $exchangeRate = isset($exchangeRates[$currencyCode])
+                    ? (float) $exchangeRates[$currencyCode]
+                    : null;
+
+                if ($exchangeRate && $exchangeRate > 0 && $population > 0) {
+                    $multiplier = random_int(1000, 2000);
+                    $estimatedGdp = ($population * $multiplier) / $exchangeRate;
+                } else {
+                    $estimatedGdp = 0;
+                }
 
                 Country::updateOrCreate(
                     ['name' => $data['name']],
                     [
                         'capital' => $data['capital'] ?? null,
                         'region' => $data['region'] ?? null,
-                        'population' => $data['population'] ?? 0,
+                        'population' => $population,
                         'currency_code' => $currencyCode,
                         'exchange_rate' => $exchangeRate,
                         'estimated_gdp' => $estimatedGdp,
                         'flag_url' => $data['flag'] ?? null,
-                        'last_refreshed_at' => Carbon::now(),
+                        'last_refreshed_at' => now(),
                     ]
                 );
             }
@@ -50,12 +61,19 @@ class CountryService
 
             DB::commit();
 
-            return ['success' => true];
+            return response()->json([
+                'message' => 'Countries refreshed successfully',
+                'total_countries' => Country::count(),
+                'last_refreshed_at' => now()->toISOString(),
+            ]);
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             DB::rollBack();
 
-            return ['error' => 'Internal server error', 'details' => $e->getMessage()];
+            return response()->json([
+                'error' => 'Internal server error',
+                'details' => $e->getMessage(),
+            ], 500);
         }
     }
 
